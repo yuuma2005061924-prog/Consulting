@@ -392,20 +392,29 @@
 
 <!-- API Key overlay -->
 <div id="api-overlay">
-  <div class="api-card">
+  <div class="api-card" style="width:480px;">
     <div class="api-title">// CONSULT BOT</div>
     <div class="api-sub">
-      Anthropic API キーを入力してください。<br>
-      キーはブラウザにのみ保存され、外部には送信されません。
+      APIキーを入力してください。キーはブラウザにのみ保存され、外部には送信されません。
     </div>
-    <div class="api-input-wrap">
-      <input type="password" id="api-key-input" placeholder="sk-ant-api03-..." />
-      <button class="btn btn-accent" onclick="saveApiKey()" style="white-space:nowrap">開始</button>
+
+    <div style="display:flex;flex-direction:column;gap:6px;">
+      <div style="font-size:12px;color:var(--text2);font-weight:500;">Anthropic APIキー <span style="color:#f87171">*必須</span></div>
+      <div class="api-input-wrap">
+        <input type="password" id="api-key-input" placeholder="sk-ant-api03-..." />
+      </div>
+      <div class="api-note">チャット機能に使用。<a href="https://console.anthropic.com/" target="_blank">console.anthropic.com</a> で取得</div>
     </div>
-    <div class="api-note">
-      APIキーは <a href="https://console.anthropic.com/" target="_blank">console.anthropic.com</a> で取得できます。
-      使った分だけの従量課金（通常月数百〜千円程度）です。
+
+    <div style="display:flex;flex-direction:column;gap:6px;">
+      <div style="font-size:12px;color:var(--text2);font-weight:500;">OpenAI APIキー <span style="color:var(--text3)">（動画文字起こし用・任意）</span></div>
+      <div class="api-input-wrap">
+        <input type="password" id="openai-key-input" placeholder="sk-proj-..." />
+      </div>
+      <div class="api-note">動画の自動文字起こしに使用。<a href="https://platform.openai.com/api-keys" target="_blank">platform.openai.com</a> で取得（なくても使えます）</div>
     </div>
+
+    <button class="btn btn-accent" onclick="saveApiKey()" style="width:100%;padding:12px;">開始する</button>
   </div>
 </div>
 
@@ -480,6 +489,7 @@
 
 <script>
 let apiKey = localStorage.getItem('consult_bot_apikey') || '';
+let openaiKey = localStorage.getItem('consult_bot_openaikey') || '';
 let knowhows = JSON.parse(localStorage.getItem('consult_bot_knowhows') || '[]');
 let chatHistory = [];
 
@@ -489,14 +499,20 @@ renderKnowhows();
 
 function saveApiKey() {
   const v = document.getElementById('api-key-input').value.trim();
-  if (!v.startsWith('sk-')) { alert('有効なAPIキーを入力してください（sk-ant-... の形式）'); return; }
+  if (!v.startsWith('sk-')) { alert('Anthropic APIキーを入力してください（sk-ant-... の形式）'); return; }
   apiKey = v;
   localStorage.setItem('consult_bot_apikey', v);
+  const oai = document.getElementById('openai-key-input').value.trim();
+  if (oai.startsWith('sk-')) {
+    openaiKey = oai;
+    localStorage.setItem('consult_bot_openaikey', oai);
+  }
   document.getElementById('api-overlay').style.display = 'none';
 }
 
 function changeApiKey() {
   document.getElementById('api-key-input').value = apiKey;
+  document.getElementById('openai-key-input').value = openaiKey;
   document.getElementById('api-overlay').style.display = 'flex';
 }
 
@@ -562,24 +578,53 @@ function handleFileSelect(e) {
 }
 
 async function transcribeFile(file) {
-  if (!apiKey) { alert('APIキーを設定してください'); return; }
+  if (!apiKey) { alert('Anthropic APIキーを設定してください'); return; }
 
   const pw = document.getElementById('progress-wrap');
   const pb = document.getElementById('progress-bar');
   const pl = document.getElementById('progress-label');
 
+  // OpenAIキーがない場合は手動入力モードへ
+  if (!openaiKey) {
+    const fallback = prompt(
+      `動画の自動文字起こしにはOpenAI APIキーが必要です。\n「APIキー変更」からOpenAI APIキーを設定すると自動化できます。\n\n今すぐ動画の内容をテキストで入力することもできます：`,
+      ''
+    );
+    if (fallback && fallback.trim()) {
+      knowhows.unshift({ id: Date.now(), type: 'video', text: `[動画: ${file.name}]\n${fallback.trim()}`, date: formatDate() });
+      saveKnowhows();
+      renderKnowhows();
+    }
+    document.getElementById('video-file').value = '';
+    return;
+  }
+
   pw.style.display = 'block';
   pl.style.display = 'block';
   pl.textContent = `"${file.name}" を文字起こし中...`;
 
-  // Animate progress
   let prog = 0;
   const timer = setInterval(() => {
-    prog = Math.min(prog + Math.random() * 8, 88);
+    prog = Math.min(prog + Math.random() * 6, 85);
     pb.style.width = prog + '%';
-  }, 400);
+  }, 500);
+
+  const resetProgress = () => {
+    clearInterval(timer);
+    pw.style.display = 'none';
+    pb.style.width = '0%';
+    pl.style.display = 'none';
+    document.getElementById('video-file').value = '';
+  };
 
   try {
+    // 25MB制限チェック
+    if (file.size > 25 * 1024 * 1024) {
+      resetProgress();
+      alert('ファイルサイズが25MBを超えています。短い動画に分割してください。');
+      return;
+    }
+
     const formData = new FormData();
     formData.append('file', file);
     formData.append('model', 'whisper-1');
@@ -587,39 +632,22 @@ async function transcribeFile(file) {
 
     const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${apiKey}` },
+      headers: { 'Authorization': `Bearer ${openaiKey}` },
       body: formData
     });
 
     clearInterval(timer);
 
     if (!res.ok) {
-      // Whisper needs OpenAI key, fallback message
       const err = await res.json().catch(() => ({}));
-      pb.style.width = '0%';
-      pw.style.display = 'none';
-      pl.style.display = 'none';
-
-      // Fallback: let user paste transcript manually
-      const fallback = prompt(
-        `動画の自動文字起こしにはOpenAI APIキーが必要です。\n\n動画の内容を手動でテキストに入力してください：`,
-        ''
-      );
-      if (fallback && fallback.trim()) {
-        knowhows.unshift({ id: Date.now(), type: 'video', text: `[動画: ${file.name}]\n${fallback.trim()}`, date: formatDate() });
-        saveKnowhows();
-        renderKnowhows();
-      }
+      resetProgress();
+      alert('文字起こしエラー: ' + (err.error?.message || 'OpenAI APIキーを確認してください'));
       return;
     }
 
     const data = await res.json();
     pb.style.width = '100%';
-    setTimeout(() => {
-      pw.style.display = 'none';
-      pb.style.width = '0%';
-      pl.style.display = 'none';
-    }, 600);
+    setTimeout(resetProgress, 600);
 
     const transcript = data.text || '';
     if (transcript) {
@@ -628,14 +656,9 @@ async function transcribeFile(file) {
       renderKnowhows();
     }
   } catch (e) {
-    clearInterval(timer);
-    pw.style.display = 'none';
-    pl.style.display = 'none';
-    pb.style.width = '0%';
-    alert('文字起こし中にエラーが発生しました: ' + e.message);
+    resetProgress();
+    alert('エラーが発生しました: ' + e.message);
   }
-
-  document.getElementById('video-file').value = '';
 }
 
 // ── Chat ──
